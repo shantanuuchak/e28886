@@ -1,11 +1,11 @@
-const ejs = require("ejs");
 const express = require("express");
 const app = express();
 const port = 3000;
 
 app.set("view engine", "ejs");
+app.use(express.static("public"));
 
-app.get("/:name", (req, res) => {
+app.get("/", (req, res) => {
   res.render("index", { name: req.params.name || "Anonymous" });
 });
 
