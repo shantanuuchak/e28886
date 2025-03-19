@@ -1,21 +1,25 @@
 {
-  "name": "e28886",
+  "name": "e28886.tech",
   "version": "1.0.0",
-  "description": "Research Paper Logger",
-  "main": "index.js",
+  "type": "module",
+  "description": "",
+  "main": "server.js",
   "scripts": {
-    "dev": "nodemon server.js"
+    "dev": "node --watch --env-file=.env server.js",
+    "start": "node --env-file=.env server.js",
+    "clear": "rm -rf *.db *.db-shm *.db-wal"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "bcrypt": "^5.1.1",
-    "better-sqlite3": "^11.7.2",
+    "better-sqlite3": "^11.8.1",
+    "cookie-parser": "^1.4.7",
     "ejs": "^3.1.10",
-    "express": "^4.21.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.9"
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "marked": "^15.0.7",
+    "sanitize-html": "^2.14.0"
   }
 }

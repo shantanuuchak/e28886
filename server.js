@@ -1,97 +1,411 @@
-const express = require("express");
+console.clear();
+
+import jwt from "jsonwebtoken";
+import express from "express";
+import bcrypt from "bcrypt";
+import cookieParser from "cookie-parser";
+import sanitizeHtml from "sanitize-html";
+import { marked } from "marked";
+import { db } from "./lib/db.js";
+
+const PORT = process.env.PORT || 3000; // Getting port number from .env
+
 const app = express();
-const bcrypt = require("bcrypt");
-const db = require("better-sqlite3")("e28886.db");
-db.pragma("journal_mode = WAL");
+app.set("view engine", "ejs"); // Setting ejs as our template engine
+app.use(cookieParser());
 
-const createTables = db.transaction(() => {
-  db.prepare(
-    `
-	CREATE TABLE IF NOT EXISTS users (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		username STRING NOT NULL UNIQUE,
-		password STRING NOT NULL
-	)
-	`
-  ).run();
-});
-
-createTables();
-
-const port = 3000;
-
-app.set("view engine", "ejs");
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static("public"));
+// MARK: Middlewares
+app.use(express.static("public")); // Using public as our static
+app.use(express.urlencoded({ extended: false })); // Parse form data
 
 app.use((req, res, next) => {
-  res.locals.errors = [];
+  // Try to decode incoming cookie
+  try {
+    const decoded = jwt.verify(req.cookies.user, process.env.JWTSECRET);
+    const { userId, username } = decoded;
+    req.user = { userId, username };
+  } catch (err) {
+    req.user = false;
+  }
+
+  // Variables for ejs templates
+  res.locals.user = req.user; // Access from templates!
+  res.locals.errors = []; // Setting empty errors for all templates
+  res.locals.title = "Publish Research Papers";
+
+  // Functions for ejs templates
+  res.locals.formatHTML = function (content) {
+    return marked.parse(content);
+  };
+
+  res.locals.truncateHTML = function (content) {
+    return sanitizeHtml(content, {
+      allowedTags: [],
+      allowedAttributes: {},
+    });
+  };
+
+  res.locals.recentPapers = function () {
+    const recentStatement = db.prepare(
+      `SELECT * FROM papers ORDER BY createdDate DESC LIMIT 4`
+    );
+
+    // Give recently published 4
+    const papers = recentStatement.all().slice(0, 4);
+    return papers;
+  };
+
+  res.locals.truncateTitle = function truncateTitle(title, maxLength = 30) {
+    return (
+      title.substring(0, maxLength) + (title.length > maxLength ? "..." : "")
+    );
+  };
+
+  res.locals.formatDate = function (dateTimeStamp) {
+    const date = new Intl.DateTimeFormat("en-US", dateTimeStamp);
+    return date.format();
+  };
+
+  console.log(req.user);
+
   next();
 });
 
+// MARK: Routes
 app.get("/", (req, res) => {
-  res.render("index", { name: req.params.name || "Anonymous" });
+  if (req.user) {
+    const statement = db.prepare(
+      `SELECT * FROM papers WHERE authorid = ? ORDER BY createdDate DESC`
+    );
+    const papers = statement.all(req.user.userId);
+
+    return res.render("dashboard", { papers });
+  }
+
+  res.render("homepage");
 });
+
+// User Registration Starts
+app.post("/register", (req, res) => {
+  let { username, password } = req.body;
+  const errors = [];
+
+  username = username.trim();
+
+  if (typeof username !== "string") username = "";
+  if (typeof password !== "string") password = "";
+
+  // Username Validation
+  if (!username) {
+    errors.push("Username is required");
+  }
+  if (username && username.length < 4) {
+    errors.push("Username must contain atleast 4 characters");
+  }
+  if (username && username.length > 15) {
+    errors.push("Username must not exceed 15 characters");
+  }
+  if (username && !username.match(/^[a-zA-Z0-9]+$/)) {
+    errors.push("Username can't contain special characters");
+  }
+
+  // Check for username in DB
+  const usernameExistsStatement = db.prepare(
+    "SELECT * FROM users WHERE USERNAME = ?"
+  );
+  const usernameCheck = usernameExistsStatement.get(username);
+
+  if (usernameCheck) {
+    errors.push("User already exists");
+  }
+
+  // Password Validation
+  if (!password) {
+    errors.push("Password is required");
+  }
+  if (password && password.length < 6) {
+    errors.push("Password must contain atleast 6 characters");
+  }
+  if (password && password.length > 20) {
+    errors.push("Password must not exceed 20 characters");
+  }
+
+  if (errors.length) {
+    return res.render("homepage", { errors });
+  }
+
+  // Add the user to our database
+  const salt = bcrypt.genSaltSync(10);
+  password = bcrypt.hashSync(password, salt);
+
+  const statement = db.prepare(
+    `INSERT INTO users (username, password) VALUES (?, ?)`
+  );
+  const result = statement.run(username, password);
+
+  // Get newly created user db rowid
+  const lookUp = db.prepare(`SELECT * FROM USERS WHERE ROWID = ?`);
+  const ourUser = lookUp.get(result.lastInsertRowid);
+
+  const ourTokenValue = jwt.sign(
+    {
+      userId: ourUser.id,
+      username: username,
+      exp: Date.now() / 1000 + 60 * 60 * 24 * 7,
+    },
+    process.env.JWTSECRET
+  );
+
+  // Send back a cookie to the user
+  res.cookie("user", ourTokenValue, {
+    httpOnly: true, // Not for client side JS
+    secure: true, // Only for https
+    sameSite: "strict", // CSRF Attacks but allows for subdomain
+    maxAge: 1000 * 60 * 60 * 24 * 7, // milliseconds, our cookie is good for a week
+  });
+
+  res.redirect("/");
+});
+// User Registration Ends
 
 app.get("/login", (req, res) => {
   res.render("login");
 });
 
-app.post("/register", (req, res) => {
-  console.log(req.body);
-
+// Implement Login
+app.post("/login", (req, res) => {
+  let { username, password } = req.body;
   const errors = [];
 
-  if (typeof req.body.username !== "string") req.body.username = "";
-  if (typeof req.body.password !== "string") req.body.password = "";
+  username = username.trim();
 
-  // Username Validation
-  req.body.username = req.body.username.toLowerCase().trim();
+  if (typeof username !== "string") username = "";
+  if (typeof password !== "string") password = "";
 
-  if (!req.body.username) {
-    errors.push("You must provide a username.");
+  // Check for empty values
+  if (!username || !password) {
+    errors.push("Invalid username / password");
   }
-
-  if (req.body.username && req.body.username.length < 4)
-    errors.push("Username must be atleast 4 characters long.");
-
-  if (req.body.username.length > 15)
-    errors.push("Username must not be longer than 15 characters.");
-
-  if (req.body.username && !req.body.username.match(/^[a-zA-Z0-9]+$/))
-    errors.push("Username can only contain letters and numbers.");
-
-  // Password Validation
-  if (!req.body.password) {
-    errors.push("You must provide a password.");
-  }
-
-  if (req.body.password && req.body.password.length < 8)
-    errors.push("Password must be atleast 8 characters long.");
-
-  if (req.body.password.length > 20)
-    errors.push("Password must not be longer than 20 characters.");
 
   if (errors.length) {
-    return res.render("index", {
-      errors: errors,
-    });
+    return res.render("login", { errors });
   }
 
-  const salt = bcrypt.genSaltSync(10);
-  req.body.password = bcrypt.hashSync(req.body.password, salt);
+  // If username is not there in the database
+  const userInDBStatement = db.prepare(
+    `SELECT * FROM users WHERE USERNAME = ?`
+  );
+  const userInDB = userInDBStatement.get(username);
 
-  // Save the user to the database
-  const ourStatement = db.prepare(
-    `INSERT INTO users (username, password) VALUES (?, ?)`
+  if (!userInDB) {
+    errors.push("User does not exist");
+    return res.render("login", { errors });
+  }
+
+  // Check for password matching
+  const passwordCheck = bcrypt.compareSync(password, userInDB.password);
+  if (!passwordCheck) {
+    errors.push("Password is incorrect");
+  }
+
+  if (errors.length > 0) {
+    return res.render("login", { errors });
+  }
+
+  // Send back a cookie to the user
+  const ourTokenValue = jwt.sign(
+    {
+      userId: userInDB.id,
+      username: username,
+      exp: Date.now() / 1000 + 60 * 60 * 24 * 7,
+    },
+    process.env.JWTSECRET
   );
 
-  ourStatement.run(req.body.username, req.body.password);
+  res.cookie("user", ourTokenValue, {
+    httpOnly: true, // Not for client side JS
+    secure: true, // Only for https
+    sameSite: "strict", // CSRF Attacks but allows for subdomain
+    maxAge: 1000 * 60 * 60 * 24 * 7, // milliseconds, our cookie is good for a week
+  });
 
-  // Log the user in by giving them a cookie
-  res.send(`Thanks for registering! ${req.body.username}`);
+  // Redirect them to the home page
+  res.redirect("/");
 });
 
-app.listen(port, () => {
-  console.log(`Example app listening at http://localhost:${port}`);
+// Logout
+app.get("/logout", (req, res) => {
+  res.clearCookie("user");
+  res.redirect("/");
+});
+
+// Implement Post Functionality
+function mustBeLoggedIn(req, res, next) {
+  if (req.user) {
+    return next();
+  }
+
+  return res.redirect("/");
+}
+
+// Common post request validation field
+function postValidation(req) {
+  const errors = [];
+
+  if (typeof req.body.title !== "string") req.body.title = "";
+  if (typeof req.body.body !== "string") req.body.body = "";
+
+  // Strip or sanitize incoming HTML paper title, body
+  req.body.title = sanitizeHtml(req.body.title, {
+    allowedTags: [],
+    allowedAttributes: {},
+  });
+
+  req.body.body = sanitizeHtml(req.body.body, {
+    allowedTags: [
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "p",
+      "strong",
+      "em",
+      "b",
+      "i",
+      "ul",
+      "ol",
+      "li",
+      "hr",
+      "img",
+      "a",
+    ],
+    allowedAttributes: {
+      a: ["href"],
+      img: ["src", "alt"],
+    },
+  });
+
+  if (!req.body.title) errors.push("Title must not be empty");
+  if (!req.body.body) errors.push("Body must not be empty");
+
+  return errors;
+}
+
+app.get("/create-paper", mustBeLoggedIn, (req, res) => {
+  res.render("create-paper");
+});
+
+// Read a paper route
+app.get("/paper/:id", (req, res) => {
+  // Read operation on db
+  const statement = db.prepare(
+    `SELECT papers.*, users.username FROM papers INNER JOIN users ON papers.authorid = users.id WHERE papers.id = ?`
+  );
+  const paper = statement.get(req.params.id);
+
+  if (!paper) {
+    return res.redirect("/");
+  }
+
+  const isAuthor = paper.authorid === req.user.userId;
+
+  return res.render("single-paper", { paper, isAuthor });
+});
+
+app.get("/edit-paper/:id", mustBeLoggedIn, (req, res) => {
+  // test if there is a paper with this id in the database
+  const statement = db.prepare(`SELECT * FROM papers WHERE id = ?`);
+  const paper = statement.get(req.params.id);
+
+  if (!paper) {
+    res.redirect("/");
+  }
+
+  // check if the user has access to edit this paper
+  if (paper.authorid !== req.user.userId) {
+    return res.redirect("/");
+  }
+
+  // otherwise render the edit functionality
+  return res.render("edit-paper", { paper });
+});
+
+app.post("/edit-paper/:id", mustBeLoggedIn, (req, res) => {
+  // test if there is a paper with this id in the database
+  const statement = db.prepare(`SELECT * FROM papers WHERE id = ?`);
+  const paper = statement.get(req.params.id);
+
+  if (!paper) {
+    res.redirect("/");
+  }
+
+  // check if the user has access to edit this paper
+  if (paper.authorid !== req.user.userId) {
+    return res.redirect("/");
+  }
+
+  const errors = postValidation(req);
+
+  if (errors.length) {
+    return res.redirect("edit-paper", { errors });
+  }
+
+  // Update into the database
+  const updateStatement = db.prepare(
+    `UPDATE papers SET title = ?, body = ? WHERE id = ?`
+  );
+  updateStatement.run(req.body.title, req.body.body, req.params.id);
+  return res.redirect(`/paper/${req.params.id}`);
+});
+
+app.post("/delete-paper/:id", mustBeLoggedIn, (req, res) => {
+  // test if there is a paper with this id in the database
+  const statement = db.prepare(`SELECT * FROM papers WHERE id = ?`);
+  const paper = statement.get(req.params.id);
+
+  if (!paper) {
+    res.redirect("/");
+  }
+
+  // check if the user has access to edit this paper
+  if (paper.authorid !== req.user.userId) {
+    return res.redirect("/");
+  }
+
+  // Delete from database
+  const deleteStatement = db.prepare(`DELETE FROM papers WHERE id = ?`);
+  deleteStatement.run(req.params.id);
+
+  return res.redirect("/");
+});
+
+app.post("/create-paper", mustBeLoggedIn, (req, res) => {
+  const errors = postValidation(req);
+
+  if (errors.length) {
+    return res.render("create-paper", { errors });
+  }
+
+  // Save into database
+  const statement = db.prepare(
+    `INSERT INTO papers (title, body, authorid, createdDate) VALUES (?, ?, ?, ?)`
+  );
+  const result = statement.run(
+    req.body.title,
+    req.body.body,
+    req.user.userId,
+    new Date().toISOString()
+  );
+
+  // Redirect user to newly created paper
+  const getPostStatement = db.prepare(`SELECT id FROM papers WHERE ROWID = ?`);
+  const realPost = getPostStatement.get(result.lastInsertRowid);
+
+  return res.redirect(`/paper/${realPost.id}`);
+});
+
+app.listen(PORT, () => {
+  console.log(`Server fired up 🔥 on PORT: ${PORT}`);
 });
